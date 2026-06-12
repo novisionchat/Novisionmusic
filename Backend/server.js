@@ -33,18 +33,46 @@ app.get('/api/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Arama hatası' }); }
 });
 
-// --- 2. PLAYLIST ÇEKME (766 Şarkı İçin) ---
+// --- 2. PLAYLIST ÇEKME (766 Şarkılık Listeler İçin Kararlı Çözüm) ---
 app.get('/api/playlist', async (req, res) => {
     try {
         const { listId } = req.query;
         if (!listId) return res.status(400).json({ error: 'Playlist ID gerekli' });
+        
+        console.log(`Playlist çekim isteği alındı: ${listId}`);
+        
+        // Önce yt-search kütüphanesini deneriz. Youtube scraping güncellemelerine karşı çok daha dayanıklıdır.
+        try {
+            const list = await ytSearch({ listId: listId });
+            if (list && list.videos && list.videos.length > 0) {
+                const videos = list.videos.map(v => ({
+                    id: v.videoId, 
+                    title: v.title, 
+                    thumbnail: v.thumbnail,
+                    channel: v.author ? v.author.name : 'Bilinmeyen Sanatçı', 
+                    duration: v.duration ? v.duration.timestamp : '0:00'
+                }));
+                return res.json(videos);
+            }
+        } catch (searchErr) {
+            console.error("yt-search çalma listesi çekemedi, ytpl ile devam ediliyor...", searchErr);
+        }
+
+        // Eğer yt-search başarısız olursa ytpl ile deneriz
         const playlist = await ytpl(listId, { limit: Infinity });
         const videos = playlist.items.map(v => ({
-            id: v.id, title: v.title, thumbnail: v.bestThumbnail.url,
-            channel: v.author.name, duration: v.duration
+            id: v.id, 
+            title: v.title, 
+            thumbnail: v.bestThumbnail ? v.bestThumbnail.url : v.thumbnail,
+            channel: v.author ? v.author.name : 'Bilinmeyen Sanatçı', 
+            duration: v.duration
         }));
         res.json(videos);
-    } catch (e) { res.status(500).json({ error: 'Playlist hatası' }); }
+        
+    } catch (e) { 
+        console.error("Playlist ayrıştırma başarısız oldu:", e);
+        res.status(500).json({ error: 'Playlist hatası. Liste bulunamadı veya Youtube erişimi kısıtladı.' }); 
+    }
 });
 
 // Birlikte dinleme (Socket) altyapısı şimdilik beklemede tutuluyor.
