@@ -4,22 +4,22 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const ytSearch = require('yt-search');
-const ytpl = require('ytpl');
 
 const app = express();
 const server = http.createServer(app);
 
-// CORS Ayarları (Her yerden erişime açık)
+// İlk başta verdiğiniz Google API Anahtarı
+const GOOGLE_API_KEY = "AIzaSyC2qq3Ko9UC3JcGrOBhj_DC8YEVbCa3PQk";
+
+// CORS Ayarları
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
 app.get('/', (req, res) => res.send('Novision Music API Aktif!'));
 
-app.get('/ping', (req, res) => {
-    res.send('pong');
-});
+app.get('/ping', (req, res) => res.send('pong'));
 
-// --- 1. YOUTUBE ARAMA ---
+// --- 1. YOUTUBE ARAMA (Tekil Şarkılar İçin yt-search yeterlidir) ---
 app.get('/api/search', async (req, res) => {
     try {
         const { q } = req.query;
@@ -33,43 +33,64 @@ app.get('/api/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Arama hatası' }); }
 });
 
-// --- 2. PLAYLIST ÇEKME (Zaman Aşımı ve Gizlilik Filtreli Çözüm) ---
+// --- 2. YOUTUBE PLAYLIST ÇEKİMİ (Resmi YouTube V3 API Kullanımı) ---
 app.get('/api/playlist', async (req, res) => {
     try {
         const { listId } = req.query;
         if (!listId) return res.status(400).json({ error: 'Playlist ID gerekli' });
         
-        console.log(`Playlist çekim isteği alındı: ${listId}`);
+        console.log(`Resmi API ile Playlist çekiliyor: ${listId}`);
         
-        // Önce yt-search deneriz (Çok hızlıdır, listenin ilk 100-200 şarkısını alır)
-        try {
-            const list = await ytSearch({ listId: listId });
-            if (list && list.videos && list.videos.length > 0) {
-                const videos = list.videos.map(v => ({
-                    id: v.videoId, 
-                    title: v.title, 
-                    thumbnail: v.thumbnail,
-                    channel: v.author ? v.author.name : 'Bilinmeyen Sanatçı', 
-                    duration: v.duration ? v.duration.timestamp : '0:00'
-                }));
-                return res.json(videos);
+        let videos = [];
+        let nextPageToken = '';
+        
+        // 4 sayfa x 50 şarkı = Maksimum 200 şarkılık kısmını çekiyoruz ki hızlı olsun
+        for(let i = 0; i < 4; i++) {
+            const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${listId}&key=${GOOGLE_API_KEY}${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
+            
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if(data.error) {
+                return res.status(400).json({ error: 'YouTube API Hatası', details: data.error.message });
             }
-        } catch (searchErr) {
-            console.error("yt-search çalma listesi çekemedi, ytpl deneniyor...", searchErr);
+            
+            if(data.items) {
+                data.items.forEach(item => {
+                    const snippet = item.snippet;
+                    // Silinmiş veya gizli şarkıları filtrele
+                    if(snippet.title !== 'Private video' && snippet.title !== 'Deleted video') {
+                        videos.push({
+                            id: snippet.resourceId.videoId,
+                            title: snippet.title,
+                            // Mümkün olan en iyi kapak fotoğrafını alıyoruz
+                            thumbnail: snippet.thumbnails?.high?.url || snippet.thumbnails?.default?.url || '/icon.png',
+                            channel: snippet.videoOwnerChannelTitle || 'Bilinmeyen Sanatçı',
+                            duration: '0:00' // Çalma listesi API'sinden süre gelmez, player çalarken zaten hesaplayacak
+                        });
+                    }
+                });
+            }
+            
+            nextPageToken = data.nextPageToken;
+            if(!nextPageToken) break; // Çekilecek başka şarkı kalmadıysa durdur
         }
+        
+        res.json(videos);
+        
+    } catch (e) { 
+        console.error("Playlist ayrıştırma başarısız oldu:", e);
+        res.status(500).json({ error: 'Sunucu tarafında playlist çekilemedi.' }); 
+    }
+});
 
-        // Eğer yt-search başarısız olursa ytpl deneriz.
-        // Render sunucusunun zaman aşımına (30 saniye) girip çökmesini engellemek için limiti 200 ile sınırlandırıyoruz.
-        try {
-            const playlist = await ytpl(listId, { limit: 200 });
-            if (playlist && playlist.items && playlist.items.length > 0) {
-                const videos = playlist.items.map(v => ({
-                    id: v.id, 
-                    title: v.title, 
-                    thumbnail: v.bestThumbnail ? v.bestThumbnail.url : v.thumbnail,
-                    channel: v.author ? v.author.name : 'Bilinmeyen Sanatçı', 
-                    duration: v.duration || '0:00'
-                }));
+const io = new Server(server, { cors: { origin: "*" } });
+io.on('connection', (socket) => {
+    console.log("Bir kullanıcı bağlandı:", socket.id);
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Sunucu ${PORT} portunda çalışıyor.`));                }));
                 return res.json(videos);
             }
         } catch (ytplErr) {
