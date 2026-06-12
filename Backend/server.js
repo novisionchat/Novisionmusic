@@ -33,7 +33,7 @@ app.get('/api/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Arama hatası' }); }
 });
 
-// --- 2. PLAYLIST ÇEKME (766 Şarkılık Listeler İçin Kararlı Çözüm) ---
+// --- 2. PLAYLIST ÇEKME (Zaman Aşımı ve Gizlilik Filtreli Çözüm) ---
 app.get('/api/playlist', async (req, res) => {
     try {
         const { listId } = req.query;
@@ -41,7 +41,7 @@ app.get('/api/playlist', async (req, res) => {
         
         console.log(`Playlist çekim isteği alındı: ${listId}`);
         
-        // Önce yt-search kütüphanesini deneriz. Youtube scraping güncellemelerine karşı çok daha dayanıklıdır.
+        // Önce yt-search deneriz (Çok hızlıdır, listenin ilk 100-200 şarkısını alır)
         try {
             const list = await ytSearch({ listId: listId });
             if (list && list.videos && list.videos.length > 0) {
@@ -55,23 +55,36 @@ app.get('/api/playlist', async (req, res) => {
                 return res.json(videos);
             }
         } catch (searchErr) {
-            console.error("yt-search çalma listesi çekemedi, ytpl ile devam ediliyor...", searchErr);
+            console.error("yt-search çalma listesi çekemedi, ytpl deneniyor...", searchErr);
         }
 
-        // Eğer yt-search başarısız olursa ytpl ile deneriz
-        const playlist = await ytpl(listId, { limit: Infinity });
-        const videos = playlist.items.map(v => ({
-            id: v.id, 
-            title: v.title, 
-            thumbnail: v.bestThumbnail ? v.bestThumbnail.url : v.thumbnail,
-            channel: v.author ? v.author.name : 'Bilinmeyen Sanatçı', 
-            duration: v.duration
-        }));
-        res.json(videos);
+        // Eğer yt-search başarısız olursa ytpl deneriz.
+        // Render sunucusunun zaman aşımına (30 saniye) girip çökmesini engellemek için limiti 200 ile sınırlandırıyoruz.
+        try {
+            const playlist = await ytpl(listId, { limit: 200 });
+            if (playlist && playlist.items && playlist.items.length > 0) {
+                const videos = playlist.items.map(v => ({
+                    id: v.id, 
+                    title: v.title, 
+                    thumbnail: v.bestThumbnail ? v.bestThumbnail.url : v.thumbnail,
+                    channel: v.author ? v.author.name : 'Bilinmeyen Sanatçı', 
+                    duration: v.duration || '0:00'
+                }));
+                return res.json(videos);
+            }
+        } catch (ytplErr) {
+            console.error("ytpl hatası:", ytplErr);
+        }
+
+        // İki kütüphane de başarısız olduysa, bunun asıl sebebi listenin "Gizli" (Private) olmasıdır.
+        return res.status(400).json({ 
+            error: 'Playlist çekilemedi.',
+            details: 'Bu listenin YouTube üzerindeki gizlilik ayarı "Gizli" (Private) olabilir. Lütfen listenizi YouTube ayarlarından "Herkese Açık" (Public) ya da "Liste Dışı" (Unlisted) konumuna getirip tekrar deneyin.'
+        });
         
     } catch (e) { 
-        console.error("Playlist ayrıştırma başarısız oldu:", e);
-        res.status(500).json({ error: 'Playlist hatası. Liste bulunamadı veya Youtube erişimi kısıtladı.' }); 
+        console.error("Genel playlist yükleme hatası:", e);
+        res.status(500).json({ error: 'Playlist yüklenirken sunucu tarafında bir hata oluştu.' }); 
     }
 });
 
