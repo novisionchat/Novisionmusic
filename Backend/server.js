@@ -8,18 +8,16 @@ const ytSearch = require('yt-search');
 const app = express();
 const server = http.createServer(app);
 
-// İlk başta verdiğiniz Google API Anahtarı
+// Google API Key
 const GOOGLE_API_KEY = "AIzaSyC2qq3Ko9UC3JcGrOBhj_DC8YEVbCa3PQk";
 
-// CORS Ayarları
 app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
 app.get('/', (req, res) => res.send('Novision Music API Aktif!'));
-
 app.get('/ping', (req, res) => res.send('pong'));
 
-// --- 1. YOUTUBE ARAMA (Tekil Şarkılar İçin yt-search yeterlidir) ---
+// --- 1. YOUTUBE ARAMA (Tekil Şarkılar) ---
 app.get('/api/search', async (req, res) => {
     try {
         const { q } = req.query;
@@ -33,7 +31,7 @@ app.get('/api/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Arama hatası' }); }
 });
 
-// --- 2. YOUTUBE PLAYLIST ÇEKİMİ (Resmi YouTube V3 API Kullanımı) ---
+// --- 2. YOUTUBE PLAYLIST ÇEKİMİ (Resmi YouTube V3 API) ---
 app.get('/api/playlist', async (req, res) => {
     try {
         const { listId } = req.query;
@@ -44,7 +42,7 @@ app.get('/api/playlist', async (req, res) => {
         let videos = [];
         let nextPageToken = '';
         
-        // 4 sayfa x 50 şarkı = Maksimum 200 şarkılık kısmını çekiyoruz ki hızlı olsun
+        // Render sunucusunun tıkanmaması için döngüyü 4 kez döndürüp maksimum 200 şarkı alıyoruz. (Daha büyük listeler için burayı artırabilirsiniz ancak timeout uyarısı alabilirsiniz)
         for(let i = 0; i < 4; i++) {
             const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${listId}&key=${GOOGLE_API_KEY}${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
             
@@ -63,17 +61,16 @@ app.get('/api/playlist', async (req, res) => {
                         videos.push({
                             id: snippet.resourceId.videoId,
                             title: snippet.title,
-                            // Mümkün olan en iyi kapak fotoğrafını alıyoruz
                             thumbnail: snippet.thumbnails?.high?.url || snippet.thumbnails?.default?.url || '/icon.png',
                             channel: snippet.videoOwnerChannelTitle || 'Bilinmeyen Sanatçı',
-                            duration: '0:00' // Çalma listesi API'sinden süre gelmez, player çalarken zaten hesaplayacak
+                            duration: '0:00' 
                         });
                     }
                 });
             }
             
             nextPageToken = data.nextPageToken;
-            if(!nextPageToken) break; // Çekilecek başka şarkı kalmadıysa durdur
+            if(!nextPageToken) break; 
         }
         
         res.json(videos);
@@ -84,32 +81,6 @@ app.get('/api/playlist', async (req, res) => {
     }
 });
 
-const io = new Server(server, { cors: { origin: "*" } });
-io.on('connection', (socket) => {
-    console.log("Bir kullanıcı bağlandı:", socket.id);
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Sunucu ${PORT} portunda çalışıyor.`));                }));
-                return res.json(videos);
-            }
-        } catch (ytplErr) {
-            console.error("ytpl hatası:", ytplErr);
-        }
-
-        // İki kütüphane de başarısız olduysa, bunun asıl sebebi listenin "Gizli" (Private) olmasıdır.
-        return res.status(400).json({ 
-            error: 'Playlist çekilemedi.',
-            details: 'Bu listenin YouTube üzerindeki gizlilik ayarı "Gizli" (Private) olabilir. Lütfen listenizi YouTube ayarlarından "Herkese Açık" (Public) ya da "Liste Dışı" (Unlisted) konumuna getirip tekrar deneyin.'
-        });
-        
-    } catch (e) { 
-        console.error("Genel playlist yükleme hatası:", e);
-        res.status(500).json({ error: 'Playlist yüklenirken sunucu tarafında bir hata oluştu.' }); 
-    }
-});
-
-// Birlikte dinleme (Socket) altyapısı şimdilik beklemede tutuluyor.
 const io = new Server(server, { cors: { origin: "*" } });
 io.on('connection', (socket) => {
     console.log("Bir kullanıcı bağlandı:", socket.id);
