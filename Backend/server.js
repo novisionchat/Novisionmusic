@@ -31,19 +31,29 @@ app.get('/api/search', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Arama hatası' }); }
 });
 
-// --- 2. YOUTUBE PLAYLIST ÇEKİMİ (Resmi YouTube V3 API) ---
+// --- 2. YOUTUBE PLAYLIST ÇEKİMİ (Sonsuz Şarkı & Gerçek İsim) ---
 app.get('/api/playlist', async (req, res) => {
     try {
         const { listId } = req.query;
         if (!listId) return res.status(400).json({ error: 'Playlist ID gerekli' });
         
         console.log(`Resmi API ile Playlist çekiliyor: ${listId}`);
+
+        // ÖNCE PLAYLIST'İN GERÇEK İSMİNİ BULALIM
+        const infoUrl = `https://www.googleapis.com/youtube/v3/playlists?part=snippet&id=${listId}&key=${GOOGLE_API_KEY}`;
+        const infoRes = await fetch(infoUrl);
+        const infoData = await infoRes.json();
+
+        let playlistName = "Youtube'dan Gelen Liste"; // Eğer isim bulunamazsa yedek isim
+        if (infoData.items && infoData.items.length > 0) {
+            playlistName = infoData.items[0].snippet.title;
+        }
         
         let videos = [];
         let nextPageToken = '';
         
-        // Render sunucusunun tıkanmaması için döngüyü 4 kez döndürüp maksimum 200 şarkı alıyoruz. (Daha büyük listeler için burayı artırabilirsiniz ancak timeout uyarısı alabilirsiniz)
-        for(let i = 0; i < 4; i++) {
+        // SONSUZ DÖNGÜ (nextPageToken bitene kadar tüm şarkıları çeker)
+        while (true) {
             const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${listId}&key=${GOOGLE_API_KEY}${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`;
             
             const response = await fetch(url);
@@ -56,7 +66,7 @@ app.get('/api/playlist', async (req, res) => {
             if(data.items) {
                 data.items.forEach(item => {
                     const snippet = item.snippet;
-                    // Silinmiş veya gizli şarkıları filtrele
+                    // Silinmiş veya gizli şarkıları filtrele (listeyi patlatmamak için)
                     if(snippet.title !== 'Private video' && snippet.title !== 'Deleted video') {
                         videos.push({
                             id: snippet.resourceId.videoId,
@@ -70,10 +80,11 @@ app.get('/api/playlist', async (req, res) => {
             }
             
             nextPageToken = data.nextPageToken;
-            if(!nextPageToken) break; 
+            if(!nextPageToken) break; // Başka sayfa (şarkı) kalmadıysa döngüyü bitir
         }
         
-        res.json(videos);
+        // Sonucu artık hem şarkılar hem de listenin ismiyle birlikte gönderiyoruz
+        res.json({ playlistName, videos });
         
     } catch (e) { 
         console.error("Playlist ayrıştırma başarısız oldu:", e);
