@@ -15,6 +15,10 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.send('Novision Music API Aktif!'));
 
+app.get('/ping', (req, res) => {
+    res.send('pong');
+});
+
 // --- 1. YOUTUBE ARAMA ---
 app.get('/api/search', async (req, res) => {
     try {
