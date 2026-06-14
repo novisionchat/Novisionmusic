@@ -7,7 +7,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@distube/ytdl-core": "^4.14.4",
+    "@vreden/youtube_scraper": "^1.2.9",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
