@@ -4,7 +4,7 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const ytSearch = require('yt-search');
-const { Readable } = require('stream'); // EKLENDİ: Web akışlarını Node akışına dönüştürmek için
+const { Readable } = require('stream'); // Web akışlarını Node akışına dönüştürmek için
 
 const app = express();
 const server = http.createServer(app);
@@ -76,70 +76,81 @@ app.get('/api/playlist', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Sunucu tarafında playlist çekilemedi.' }); }
 });
 
-// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (COBALT STREAM PROXY MİMARİSİ) ---
+// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (OCEANSAVER KORUMASIZ POLLING MİMARİSİ) ---
 app.get('/api/download', async (req, res) => {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: 'Video ID gerekli' });
 
     try {
-        const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+        console.log(`[Sunucu] OceanSaver dönüştürme işi başlatılıyor: ${id}`);
+        
+        // 1. ADIM: OceanSaver sunucusunda indirme görevini (Job) oluştur
+        const initUrl = `https://p.oceansaver.in/ajax/download.php?copyright=0&format=mp3&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`;
+        
+        const initRes = await fetch(initUrl, {
+            headers: {
+                "accept": "*/*",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+        });
+
+        if (!initRes.ok) throw new Error("Dönüştürme sunucusu başlatma isteğini reddetti.");
+        const initData = await initRes.json();
+
+        if (!initData.success || !initData.id) {
+            throw new Error(initData.message || "İndirme başlatılamadı.");
+        }
+
+        const jobId = initData.id;
+        console.log(`[Sunucu] Görev oluşturuldu (ID: ${jobId}). Dönüştürme durumu sorgulanıyor...`);
+
         let mp3Url = null;
+        let attempts = 0;
 
-        // Backend üzerinden Cobalt sunucularını dene (Sunucumuz CORS ve Turnstile'a takılmaz!)
-        const instances = [
-          "https://api.cobalt.tools/",
-          "https://cobalt.meowing.de/",
-          "https://cobalt.canine.tools/"
-        ];
+        // 2. ADIM: Sunucu tarafında döngüsel durum sorgulama (Maksimum 60 saniye bekler)
+        while (attempts < 30) {
+            attempts++;
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 saniye bekle
 
-        for (const instance of instances) {
-          try {
-            console.log(`Arka planda deneniyor: ${instance}`);
-            const cobaltRes = await fetch(instance, {
-              method: "POST",
-              headers: {
-                "Accept": "application/json",
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                url: videoUrl,
-                downloadMode: "audio",
-                audioFormat: "mp3"
-              })
+            const progressRes = await fetch(`https://p.oceansaver.in/api/progress?id=${jobId}`, {
+                headers: {
+                    "accept": "*/*",
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }
             });
 
-            if (cobaltRes.ok) {
-              const cobaltData = await cobaltRes.json();
-              if (cobaltData && cobaltData.url) {
-                mp3Url = cobaltData.url;
-                console.log(`MP3 Linki başarıyla ayıklandı: ${mp3Url}`);
-                break;
-              }
+            if (progressRes.ok) {
+                const progressData = await progressRes.json();
+                console.log(`[Sunucu] İş ${jobId} durumu: %${(progressData.progress || 0) / 10}`);
+
+                if (progressData.download_url) {
+                    mp3Url = progressData.download_url;
+                    break; // MP3 hazır, döngüden çık
+                }
+                if (progressData.error) {
+                    throw new Error(`Dönüştürme Hatası: ${progressData.error}`);
+                }
             }
-          } catch (err) {
-            console.warn(`Sunucu üzerinden bağlantı hatası (${instance}):`, err.message);
-          }
         }
 
-        if (!mp3Url) {
-            return res.status(500).json({ error: 'Tüm indirme sunucuları şu anda meşgul.' });
-        }
+        if (!mp3Url) throw new Error("Dönüştürme işlemi zaman aşımına uğradı.");
 
-        // MP3 dosyasını sunucu üzerinden çekip anlık olarak istemciye (Frontend) yayınla (Proxy Stream)
+        // 3. ADIM: MP3 dosyasını kendi sunucumuza çekip, istemciye pürüzsüzce yayınla (Stream)
+        console.log(`[Sunucu] Dönüştürme tamamlandı. Dosya çekilip yayınlanıyor: ${mp3Url}`);
+        
         const fileResponse = await fetch(mp3Url);
         if (!fileResponse.ok) throw new Error("Dosya akışı başlatılamadı.");
 
         res.header('Content-Disposition', `attachment; filename="${id}.mp3"`);
         res.header('Content-Type', 'audio/mpeg');
 
-        // Web akışını (ReadableStream) Node.js uyumlu akışa çevirip tarayıcıya basıyoruz
         const reader = fileResponse.body;
         const nodeReadable = Readable.fromWeb(reader);
         nodeReadable.pipe(res);
 
     } catch (error) {
-        console.error("İndirme Köprüsü Hatası:", error);
-        res.status(500).json({ error: 'İndirme işlemi tamamlanamadı.' });
+        console.error("[Sunucu] Köprü Hatası:", error.message);
+        res.status(500).json({ error: error.message || 'İndirme işlemi tamamlanamadı.' });
     }
 });
 
