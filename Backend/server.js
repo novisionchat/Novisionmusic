@@ -4,7 +4,8 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const ytSearch = require('yt-search');
-const https = require('https'); // EKLENDİ: Node'un kararlı HTTPS kütüphanesi
+const https = require('https');
+const yt = require('@vreden/youtube_scraper'); // EKLENDİ: En güncel 2026 YouTube indirme motoru
 
 const app = express();
 const server = http.createServer(app);
@@ -76,80 +77,28 @@ app.get('/api/playlist', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Sunucu tarafında playlist çekilemedi.' }); }
 });
 
-// --- YARDIMCI FONKSİYON: SSL ENGELİNİ AŞAN HTTPS GET ---
-function makeHttpsRequest(url) {
-    return new Promise((resolve, reject) => {
-        const options = {
-            rejectUnauthorized: false, // DİKKAT: SSL sertifika hatalarını (fetch failed) tamamen bypass eder!
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json"
-            }
-        };
-
-        https.get(url, options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => { data += chunk; });
-            res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch (e) {
-                    reject(new Error("Sunucudan geçersiz veri döndü."));
-                }
-            });
-        }).on('error', (err) => {
-            reject(err);
-        });
-    });
-}
-
-// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (OCEANSAVER HTTPS PROXY) ---
+// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (VREDEN SCRAPER MİMARİSİ) ---
 app.get('/api/download', async (req, res) => {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: 'Video ID gerekli' });
 
     try {
-        console.log(`[Sunucu] OceanSaver dönüştürme işi başlatılıyor: ${id}`);
+        console.log(`[Sunucu] @vreden/youtube_scraper ile ses dönüştürülüyor: ${id}`);
         
-        // 1. ADIM: OceanSaver sunucusunda indirme görevini (Job) oluştur
-        const initUrl = `https://p.oceansaver.in/ajax/download.php?copyright=0&format=mp3&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`;
-        
-        const initData = await makeHttpsRequest(initUrl);
+        // 1. ADIM: Kütüphane aracılığıyla çalışan en hızlı MP3 linkini ayıkla (128 kbps kalitesinde)
+        const result = await yt.ytmp3(`https://www.youtube.com/watch?v=${id}`, 128);
 
-        if (!initData.success || !initData.id) {
-            throw new Error(initData.message || "İndirme sıraya alınamadı.");
+        if (!result || !result.status || !result.download || !result.download.url) {
+            console.error("[Sunucu] Scraper Hatası:", result);
+            return res.status(500).json({ error: 'Ses dönüştürme işlemi başarısız oldu.' });
         }
 
-        const jobId = initData.id;
-        console.log(`[Sunucu] Görev oluşturuldu (ID: ${jobId}). Durum sorgulanıyor...`);
+        const mp3Url = result.download.url;
+        console.log(`[Sunucu] Ses linki başarıyla ayıklandı: ${mp3Url}`);
 
-        let mp3Url = null;
-        let attempts = 0;
-
-        // 2. ADIM: Sunucu tarafında döngüsel durum sorgulama (Maksimum 60 saniye bekler)
-        while (attempts < 30) {
-            attempts++;
-            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 saniye bekle
-
-            const progressData = await makeHttpsRequest(`https://p.oceansaver.in/api/progress?id=${jobId}`);
-            console.log(`[Sunucu] İş ${jobId} durumu: %${(progressData.progress || 0) / 10}`);
-
-            if (progressData.download_url) {
-                mp3Url = progressData.download_url;
-                break; // MP3 hazır, döngüden çık
-            }
-            if (progressData.error) {
-                throw new Error(`Dönüştürme Hatası: ${progressData.error}`);
-            }
-        }
-
-        if (!mp3Url) throw new Error("Dönüştürme işlemi zaman aşımına uğradı.");
-
-        // 3. ADIM: Güvenli HTTPS ile MP3'ü çekip, istemciye (Frontend'e) anlık yayınla (Pipe Stream)
-        console.log(`[Sunucu] Dönüştürme tamamlandı. Dosya çekilip yayınlanıyor: ${mp3Url}`);
-        
+        // 2. ADIM: Ayıklanan MP3'ü güvenli HTTPS ile çekip tarayıcıya pipe (yayın) et
         const fileOptions = {
-            rejectUnauthorized: false, // SSL bypass
+            rejectUnauthorized: false, // SSL sertifika el sıkışma hatalarını tamamen göz ardı et (fetch failed hatasını önler)
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
@@ -157,24 +106,24 @@ app.get('/api/download', async (req, res) => {
 
         https.get(mp3Url, fileOptions, (fileRes) => {
             if (fileRes.statusCode !== 200 && fileRes.statusCode !== 206) {
+                console.error(`[Sunucu] Dosya sunucu hatası döndü, HTTP: ${fileRes.statusCode}`);
                 res.status(500).json({ error: "Dosya akışı başlatılamadı, HTTP: " + fileRes.statusCode });
                 return;
             }
 
-            // Başarılı header bilgilerini tarayıcıya yolla
             res.header('Content-Disposition', `attachment; filename="${id}.mp3"`);
             res.header('Content-Type', 'audio/mpeg');
             
-            // Dosyayı sunucumuzun içine yüklemeden anında tarayıcıya akıtıyoruz!
+            // Veriyi sunucuda depolamadan anlık olarak Netlify tarayıcına akıt
             fileRes.pipe(res);
         }).on('error', (err) => {
-            console.error("Yayın sırasında hata:", err);
+            console.error("[Sunucu] Dosya akıtılırken hata:", err);
             res.status(500).json({ error: "Yayın sırasında ağ hatası." });
         });
 
     } catch (error) {
-        console.error("[Sunucu] Köprü Hatası:", error.message);
-        res.status(500).json({ error: error.message || 'İndirme işlemi tamamlanamadı.' });
+        console.error("[Sunucu] Kritik Hata:", error.message);
+        res.status(500).json({ error: 'Sunucu indirme işlemini tamamlayamadı.' });
     }
 });
 
