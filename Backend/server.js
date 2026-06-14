@@ -4,7 +4,7 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const ytSearch = require('yt-search');
-const ytdl = require('@distube/ytdl-core'); // Yeni İndirme Motoru
+const { Readable } = require('stream'); // EKLENDİ: Web akışlarını Node akışına dönüştürmek için
 
 const app = express();
 const server = http.createServer(app);
@@ -76,27 +76,70 @@ app.get('/api/playlist', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Sunucu tarafında playlist çekilemedi.' }); }
 });
 
-// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (YENİ EKLENDİ) ---
+// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (COBALT STREAM PROXY MİMARİSİ) ---
 app.get('/api/download', async (req, res) => {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: 'Video ID gerekli' });
 
     try {
-        const url = `https://www.youtube.com/watch?v=${id}`;
-        
-        // Frontend'e bunun bir ses dosyası olduğunu söylüyoruz
+        const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+        let mp3Url = null;
+
+        // Backend üzerinden Cobalt sunucularını dene (Sunucumuz CORS ve Turnstile'a takılmaz!)
+        const instances = [
+          "https://api.cobalt.tools/",
+          "https://cobalt.meowing.de/",
+          "https://cobalt.canine.tools/"
+        ];
+
+        for (const instance of instances) {
+          try {
+            console.log(`Arka planda deneniyor: ${instance}`);
+            const cobaltRes = await fetch(instance, {
+              method: "POST",
+              headers: {
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                url: videoUrl,
+                downloadMode: "audio",
+                audioFormat: "mp3"
+              })
+            });
+
+            if (cobaltRes.ok) {
+              const cobaltData = await cobaltRes.json();
+              if (cobaltData && cobaltData.url) {
+                mp3Url = cobaltData.url;
+                console.log(`MP3 Linki başarıyla ayıklandı: ${mp3Url}`);
+                break;
+              }
+            }
+          } catch (err) {
+            console.warn(`Sunucu üzerinden bağlantı hatası (${instance}):`, err.message);
+          }
+        }
+
+        if (!mp3Url) {
+            return res.status(500).json({ error: 'Tüm indirme sunucuları şu anda meşgul.' });
+        }
+
+        // MP3 dosyasını sunucu üzerinden çekip anlık olarak istemciye (Frontend) yayınla (Proxy Stream)
+        const fileResponse = await fetch(mp3Url);
+        if (!fileResponse.ok) throw new Error("Dosya akışı başlatılamadı.");
+
         res.header('Content-Disposition', `attachment; filename="${id}.mp3"`);
         res.header('Content-Type', 'audio/mpeg');
 
-        // Ytdl ile sesi çekip anında frontend'e basıyoruz (Stream)
-        ytdl(url, {
-            filter: 'audioonly',
-            quality: 'highestaudio'
-        }).pipe(res);
+        // Web akışını (ReadableStream) Node.js uyumlu akışa çevirip tarayıcıya basıyoruz
+        const reader = fileResponse.body;
+        const nodeReadable = Readable.fromWeb(reader);
+        nodeReadable.pipe(res);
 
     } catch (error) {
-        console.error("İndirme Hatası:", error);
-        res.status(500).json({ error: 'İndirme işlemi başarısız oldu.' });
+        console.error("İndirme Köprüsü Hatası:", error);
+        res.status(500).json({ error: 'İndirme işlemi tamamlanamadı.' });
     }
 });
 
