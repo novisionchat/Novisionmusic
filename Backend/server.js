@@ -4,7 +4,7 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const ytSearch = require('yt-search');
-const { Readable } = require('stream'); // Web akışlarını Node akışına dönüştürmek için
+const https = require('https'); // EKLENDİ: Node'un kararlı HTTPS kütüphanesi
 
 const app = express();
 const server = http.createServer(app);
@@ -76,7 +76,34 @@ app.get('/api/playlist', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Sunucu tarafında playlist çekilemedi.' }); }
 });
 
-// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (OCEANSAVER KORUMASIZ POLLING MİMARİSİ) ---
+// --- YARDIMCI FONKSİYON: SSL ENGELİNİ AŞAN HTTPS GET ---
+function makeHttpsRequest(url) {
+    return new Promise((resolve, reject) => {
+        const options = {
+            rejectUnauthorized: false, // DİKKAT: SSL sertifika hatalarını (fetch failed) tamamen bypass eder!
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json"
+            }
+        };
+
+        https.get(url, options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch (e) {
+                    reject(new Error("Sunucudan geçersiz veri döndü."));
+                }
+            });
+        }).on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+
+// --- 3. ŞARKI İNDİRME KÖPRÜSÜ (OCEANSAVER HTTPS PROXY) ---
 app.get('/api/download', async (req, res) => {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: 'Video ID gerekli' });
@@ -87,22 +114,14 @@ app.get('/api/download', async (req, res) => {
         // 1. ADIM: OceanSaver sunucusunda indirme görevini (Job) oluştur
         const initUrl = `https://p.oceansaver.in/ajax/download.php?copyright=0&format=mp3&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`;
         
-        const initRes = await fetch(initUrl, {
-            headers: {
-                "accept": "*/*",
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-        });
-
-        if (!initRes.ok) throw new Error("Dönüştürme sunucusu başlatma isteğini reddetti.");
-        const initData = await initRes.json();
+        const initData = await makeHttpsRequest(initUrl);
 
         if (!initData.success || !initData.id) {
-            throw new Error(initData.message || "İndirme başlatılamadı.");
+            throw new Error(initData.message || "İndirme sıraya alınamadı.");
         }
 
         const jobId = initData.id;
-        console.log(`[Sunucu] Görev oluşturuldu (ID: ${jobId}). Dönüştürme durumu sorgulanıyor...`);
+        console.log(`[Sunucu] Görev oluşturuldu (ID: ${jobId}). Durum sorgulanıyor...`);
 
         let mp3Url = null;
         let attempts = 0;
@@ -112,41 +131,46 @@ app.get('/api/download', async (req, res) => {
             attempts++;
             await new Promise(resolve => setTimeout(resolve, 2000)); // 2 saniye bekle
 
-            const progressRes = await fetch(`https://p.oceansaver.in/api/progress?id=${jobId}`, {
-                headers: {
-                    "accept": "*/*",
-                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                }
-            });
+            const progressData = await makeHttpsRequest(`https://p.oceansaver.in/api/progress?id=${jobId}`);
+            console.log(`[Sunucu] İş ${jobId} durumu: %${(progressData.progress || 0) / 10}`);
 
-            if (progressRes.ok) {
-                const progressData = await progressRes.json();
-                console.log(`[Sunucu] İş ${jobId} durumu: %${(progressData.progress || 0) / 10}`);
-
-                if (progressData.download_url) {
-                    mp3Url = progressData.download_url;
-                    break; // MP3 hazır, döngüden çık
-                }
-                if (progressData.error) {
-                    throw new Error(`Dönüştürme Hatası: ${progressData.error}`);
-                }
+            if (progressData.download_url) {
+                mp3Url = progressData.download_url;
+                break; // MP3 hazır, döngüden çık
+            }
+            if (progressData.error) {
+                throw new Error(`Dönüştürme Hatası: ${progressData.error}`);
             }
         }
 
         if (!mp3Url) throw new Error("Dönüştürme işlemi zaman aşımına uğradı.");
 
-        // 3. ADIM: MP3 dosyasını kendi sunucumuza çekip, istemciye pürüzsüzce yayınla (Stream)
+        // 3. ADIM: Güvenli HTTPS ile MP3'ü çekip, istemciye (Frontend'e) anlık yayınla (Pipe Stream)
         console.log(`[Sunucu] Dönüştürme tamamlandı. Dosya çekilip yayınlanıyor: ${mp3Url}`);
         
-        const fileResponse = await fetch(mp3Url);
-        if (!fileResponse.ok) throw new Error("Dosya akışı başlatılamadı.");
+        const fileOptions = {
+            rejectUnauthorized: false, // SSL bypass
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+        };
 
-        res.header('Content-Disposition', `attachment; filename="${id}.mp3"`);
-        res.header('Content-Type', 'audio/mpeg');
+        https.get(mp3Url, fileOptions, (fileRes) => {
+            if (fileRes.statusCode !== 200 && fileRes.statusCode !== 206) {
+                res.status(500).json({ error: "Dosya akışı başlatılamadı, HTTP: " + fileRes.statusCode });
+                return;
+            }
 
-        const reader = fileResponse.body;
-        const nodeReadable = Readable.fromWeb(reader);
-        nodeReadable.pipe(res);
+            // Başarılı header bilgilerini tarayıcıya yolla
+            res.header('Content-Disposition', `attachment; filename="${id}.mp3"`);
+            res.header('Content-Type', 'audio/mpeg');
+            
+            // Dosyayı sunucumuzun içine yüklemeden anında tarayıcıya akıtıyoruz!
+            fileRes.pipe(res);
+        }).on('error', (err) => {
+            console.error("Yayın sırasında hata:", err);
+            res.status(500).json({ error: "Yayın sırasında ağ hatası." });
+        });
 
     } catch (error) {
         console.error("[Sunucu] Köprü Hatası:", error.message);
